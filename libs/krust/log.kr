@@ -1,0 +1,49 @@
+// libs/dust/log.dust
+
+// Используем JSON для надежного изменения глобального состояния 
+// (так как (Bool name => val) внутри функции создает локальную переменную)
+(Json log_state => {"isDebug": false})
+
+(func setDebug, (state) => (
+    (json_set, log_state, "isDebug", state)
+))
+
+(func _print_log, (colored_prefix, message) => (
+    // Собираем: "[ЦВЕТНОЙ_ПРЕФИКС] сообщение"
+    (String full_msg => (str_concat, colored_prefix, " ", message))
+    (print, "%full_msg")
+    (free, "full_msg")
+    // colored_prefix освобождается вызывающей функцией
+))
+
+(func info, (message) => (
+    // \033[32m - зеленый текст, \033[0m - сброс цвета
+    (String prefix => "\033[32m[INFO]\033[0m")
+    (_print_log, prefix, message)
+    (free, "prefix")
+))
+
+(func warning, (message) => (
+    // \033[33m - желтый текст
+    (String prefix => "\033[33m[WARNING]\033[0m")
+    (_print_log, prefix, message)
+    (free, "prefix")
+))
+
+(func error, (message) => (
+    // \033[31m - красный текст
+    (String prefix => "\033[31m[ERROR]\033[0m")
+    (_print_log, prefix, message)
+    (free, "prefix")
+))
+
+(func debug, (message) => (
+    (Bool should_log => (json_get, log_state, "isDebug"))
+    (if, should_log, (
+        // \033[36m - голубой (cyan) текст
+        (String prefix => "\033[36m[DEBUG]\033[0m")
+        (_print_log, prefix, message)
+        (free, "prefix")
+    ))
+    (free, "should_log")
+))
