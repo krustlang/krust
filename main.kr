@@ -1,1 +1,5 @@
-(print, "Hello, World!")
+(func test, () => (
+    (raise, "Я очень рад, я депутат")
+))
+
+(test)
