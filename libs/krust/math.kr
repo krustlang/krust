@@ -5,7 +5,3 @@
 (func square, (x) => (
     (return, (*, x, x))
 ))
-
-(func divide, (a, b) => (
-    (return, (/, a, b))
-))

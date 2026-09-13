@@ -13,7 +13,7 @@ import platform
 import requests
 import urllib.parse
 
-VERSION = '2.1.0-FULL-CB'
+VERSION = 'b1.0'
 
 # Отключаем сборщик мусора Python
 gc.disable()
@@ -193,13 +193,16 @@ def parse_expr(tokens):
 def parse_func_def(tokens):
     expect(tokens, 'LPAREN'); expect(tokens, 'IDENT')
     name = expect(tokens, 'IDENT')[1]; expect(tokens, 'COMMA')
-    expect(tokens, 'LPAREN')
+    expect(tokens, 'LPAREN')  # (
     params = []
     while tokens[0][0] != 'RPAREN':
         params.append(expect(tokens, 'IDENT')[1])
         if tokens[0][0] == 'COMMA': tokens.pop(0)
     expect(tokens, 'RPAREN'); expect(tokens, 'ARROW')
-    body = parse_block(tokens); expect(tokens, 'RPAREN')
+    
+    body = parse_expr(tokens)
+    
+    expect(tokens, 'RPAREN')
     return ('FuncDef', name, params, body)
 
 def parse_var_decl(tokens):
@@ -436,16 +439,32 @@ def builtin_import(env, args):
     if len(args) != 1 or args[0][0] != 'String':
         raise RuntimeError("import принимает строку с именем файла")
     filename = args[0][1]
-    filepath = os.path.join('libs', f"{filename}.krust")
+
+    # Ищем библиотеку относительно директории интерпретатора
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    filepath = os.path.join(base_dir, 'libs', f"{filename}.kr")
+
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             code = f.read()
     except FileNotFoundError:
-        raise RuntimeError(f"Библиотека '{filename}.krust' не найдена в папке libs/")
-    
+        raise RuntimeError(f"Библиотека '{filename}.kr' не найдена в {os.path.join(base_dir, 'libs')}")
+
     ast = parse(code)
+
+    # Создаём ИЗОЛИРОВАННОЕ окружение для библиотеки
+    lib_env = Environment(env)  # parent = env, чтобы видеть внешние переменные
+
+    # Локальные __FILENAME__ / __DIRNAME__ — свои у каждой библиотеки
+    lib_filename = os.path.basename(filepath)
+    lib_dirname  = os.path.dirname(filepath)
+    lib_env.set('__FILENAME__', ('String', lib_filename))
+    lib_env.set('__DIRNAME__',  ('String', lib_dirname))
+    lib_env.set('__LIBNAME__',  ('String', filename))  # на всякий случай
+
     for node in ast:
-        evaluate(node, env, f"импорте '{filename}'")
+        evaluate(node, lib_env, f"импорте '{filename}'")
+
     return ('Void', None)
 
 @krust_builtin("py_exec")
@@ -1307,7 +1326,30 @@ def builtin_wget(env, args):
 
 @krust_builtin("system_info")
 def builtin_system_info(env, args):
-    return ('Json', {"system": os.name, "system_ver": platform.version(), "krust_version": VERSION})
+    return ('Json', {"system_ver": platform.version(), "krust_version": VERSION})
+
+# === Регулярные выражения ===
+@krust_builtin("reg_match")
+def builtin_reg_match(env, args):
+    if len(args) != 2:
+        raise RuntimeError("reg_match требует 2 аргумента: (выражение, строка)")
+
+    reg_t, reg = args[0]
+    string_t, string = args[1]
+
+    if reg_t != 'String':
+        raise RuntimeError("Выражение должно быть String")
+    if string_t != 'String':
+        raise RuntimeError("Строка должна быть String")
+
+    matched = re.match(reg, string)
+    if not matched:
+        return ('List', [])  # пустой список — совпадений нет
+
+    # matched.groups() — только группы (без всего совпадения)
+    # matched.group(0) — всё совпадение
+    groups = [matched.group(0)] + list(matched.groups())
+    return ('List', [('String', g) for g in groups if g is not None])
 
 # ==========================================
 # 5. Интерпретатор с Traceback и FuncRef
@@ -1461,14 +1503,65 @@ def evaluate(node, env, current_frame="<main>"):
     except Exception as e:
         raise KrustError(str(e), current_frame)
 
+def _bracket_balance(code):
+    """Возвращает разницу открытых и закрытых скобок, игнорируя строки и комментарии."""
+    depth = 0
+    in_string = False
+    in_comment = False
+    escape = False
+    i = 0
+    while i < len(code):
+        ch = code[i]
+
+        if in_comment:
+            if ch == '\n':
+                in_comment = False
+            i += 1
+            continue
+
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+
+        if ch == '/' and i + 1 < len(code) and code[i+1] == '/':
+            in_comment = True
+            i += 2
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch in '([{':
+            depth += 1
+        elif ch in ')]}':
+            depth -= 1
+
+        i += 1
+    return depth
+
 # ==========================================
 # 6. Точка входа
 # ==========================================
-def run_krust(code):
+def run_krust(code, main_filename=None, main_dirname=None, main_libname=None):
     global GLOBAL_KRUST_ENV
 
     env = Environment()
     GLOBAL_KRUST_ENV = env
+
+    if main_filename is not None:
+        env.set('__FILENAME__', ('String', main_filename))
+    if main_dirname is not None:
+        env.set('__DIRNAME__',  ('String', main_dirname))
+    if main_libname is not None:
+        env.set('__LIBNAME__',  ('String', main_libname))
+
+    env.set('OS', ('String', platform.system()))
+
     try:
         ast = parse(code)
         for node in ast:
@@ -1480,15 +1573,67 @@ def run_krust(code):
     except Exception as e:
         print(f"[KRUST ERROR] Неожиданная ошибка Python: {e}")
 
+def run_repl():
+    global GLOBAL_KRUST_ENV
+
+    env = Environment()
+    GLOBAL_KRUST_ENV = env
+
+    env.set('__FILENAME__', ('String', '*repl'))
+    env.set('__DIRNAME__',  ('String', '*repl'))
+    env.set('__LIBNAME__',  ('String', '*repl'))
+    env.set('OS', ('String', platform.system()))
+
+    buffer = []
+    while True:
+        prompt = "REPL> " if not buffer else "...   "
+        try:
+            line = input(prompt)
+        except EOFError:
+            break
+
+        if not buffer and line.lower().strip() == "exit":
+            break
+
+        buffer.append(line)
+        code = "\n".join(buffer)
+
+        # Если скобки не сбалансированы — ждём продолжения
+        if _bracket_balance(code) > 0:
+            continue
+
+        buffer.clear()
+
+        try:
+            ast = parse(code)
+            for node in ast:
+                evaluate(node, env, "<main>")
+        except SyntaxError as e:
+            print(f"\n[SYNTAX ERROR] {e}")
+        except KrustError as e:
+            print(e)
+        except Exception as e:
+            print(f"[KRUST ERROR] Неожиданная ошибка Python: {e}")
+
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser('Krust Language', description='A Functional Programming Language')
-    argparser.add_argument('file', help='Файл для исполнения')
+    argparser.add_argument('file', nargs='?', help='Файл для исполнения')
     args = argparser.parse_args()
+
+    if not args.file:
+        run_repl()
+        exit(0)
+
+    abs_main = os.path.abspath(args.file)
+
+    __FILENAME__ = os.path.basename(abs_main)
+    __DIRNAME__  = os.path.dirname(abs_main)
+    __LIBNAME__  = os.path.splitext(__FILENAME__)[0]
 
     with open(args.file, 'r', encoding='utf-8') as f:
         krust_code = f.read()
 
     start = time.time()
-    run_krust(krust_code)
+    run_krust(krust_code, __FILENAME__, __DIRNAME__, __LIBNAME__)
     end = time.time()
     print(f"\nВсего выполнено за {end - start:.4f} сек.")
