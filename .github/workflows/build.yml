@@ -92,7 +92,7 @@ jobs:
             --noconfirm \
             --clean \
             --name krust-${{ matrix.target }} \
-            main.py
+            krust.py
 
       # ----- ARM64 сборка через Docker + QEMU -----
       - name: Build with PyInstaller (ARM64 via Docker)
