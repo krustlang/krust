@@ -13,6 +13,9 @@ import platform
 import requests
 import urllib.parse
 
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog, colorchooser
+
 VERSION = 'b1.0'
 
 # Отключаем сборщик мусора Python
@@ -52,6 +55,7 @@ TOKEN_SPEC = [
     ('BOOL',    r'\b(true|false)\b'),
     ('NUMBER',  r'-?\d+(\.\d+)?'),
     ('IDENT',   r'[a-zA-Z_][a-zA-Z0-9_]*'),
+    ('BYTES',   r'b"[^"\\]*(?:\\.[^"\\]*)*"'), 
     ('PLUS',    r'\+'),
     ('MINUS',   r'-'),
     ('MUL',     r'\*'),
@@ -76,13 +80,11 @@ OPERATOR_MAP = {
 def tokenize(code):
     tokens = []
     lines = code.split('\n')
-    # Создаем карту позиций для быстрого поиска строки по индексу
     line_starts = [0]
     for line in lines:
         line_starts.append(line_starts[-1] + len(line) + 1)
 
     def get_pos(index):
-        # Бинарный поиск или простой проход для определения строки
         line_num = 1
         for i, start in enumerate(line_starts):
             if index < start:
@@ -96,7 +98,7 @@ def tokenize(code):
         value = mo.group()
         start_idx = mo.start()
         line, col = get_pos(start_idx)
-        
+
         if kind == 'NUMBER':
             value = float(value) if '.' in value else int(value)
         elif kind == 'STRING':
@@ -106,6 +108,17 @@ def tokenize(code):
             value = value.replace('\\r', '\r')
             value = value.replace('\\033', '\033')
             value = value.replace('\\x1b', '\x1b')
+        elif kind == 'BYTES':
+            value = value[2:-1]
+            raw_str = value \
+                .replace('\\n', '\n') \
+                .replace('\\t', '\t') \
+                .replace('\\r', '\r') \
+                .replace('\\033', '\033') \
+                .replace('\\x1b', '\x1b')
+            
+            tokens.append(('BYTES', raw_str.encode('utf-8'), line, col))
+            continue
         elif kind in ('SKIP', 'COMMENT') or kind is None:
             continue
         elif kind in OPERATOR_MAP:
@@ -113,16 +126,16 @@ def tokenize(code):
             continue
         elif kind == 'MISMATCH':
             raise RuntimeError(f'Недопустимый символ: {value} в строке {line}:{col}')
-        
+
         tokens.append((kind, value, line, col))
-    
+
     tokens.append(('EOF', None, len(lines), 1))
     return tokens
 
 # ==========================================
 # 2. Парсер
 # ==========================================
-VALID_TYPES = {'String', 'Int', 'Float', 'Bool', 'Void', 'Tuple', 'List', 'Json', 'Ref', 'Func'}
+VALID_TYPES = {'Bytes', 'String', 'Int', 'Float', 'Bool', 'Void', 'Tuple', 'List', 'Json', 'Ref', 'Func', 'Any', 'Tkinter', 'TkWindow', 'TkWidget'}
 
 def peek(tokens, offset=0):
     if offset < len(tokens): return tokens[offset]
@@ -131,11 +144,11 @@ def peek(tokens, offset=0):
 def expect(tokens, kind):
     if not tokens:
         raise SyntaxError(f"Неожиданный конец файла. Ожидалось: {kind}")
-    
+
     if tokens[0][0] != kind:
         got_type, got_val, line, col = tokens[0]
         raise SyntaxError(f"Ошибка синтаксиса в строке {line}:{col}. Ожидалось {kind}, получено {got_type} ('{got_val}')")
-    
+
     return tokens.pop(0)
 
 def parse_primary(tokens):
@@ -143,7 +156,7 @@ def parse_primary(tokens):
     if first[0] == 'STRING': tokens.pop(0); return ('StringLit', first[1])
     if first[0] == 'NUMBER': tokens.pop(0); return ('IntLit', first[1]) if isinstance(first[1], int) else ('FloatLit', first[1])
     if first[0] == 'BOOL': tokens.pop(0); return ('BoolLit', first[1] == 'true')
-    
+
     if first[0] == 'LBRACKET':
         tokens.pop(0)
         items = []
@@ -151,7 +164,7 @@ def parse_primary(tokens):
             items.append(parse_expr(tokens))
             if tokens[0][0] == 'COMMA': tokens.pop(0)
         expect(tokens, 'RBRACKET'); return ('ListLit', items)
-        
+
     if first[0] == 'LBRACE':
         tokens.pop(0)
         pairs = []
@@ -161,16 +174,16 @@ def parse_primary(tokens):
             pairs.append((key, value))
             if tokens[0][0] == 'COMMA': tokens.pop(0)
         expect(tokens, 'RBRACE'); return ('JsonLit', pairs)
-        
+
     if first[0] == 'IDENT':
         tokens.pop(0); return ('Ident', first[1])
-        
+
     raise SyntaxError(f"Неожиданный токен в primary: {first}")
 
 def parse_expr(tokens):
     if not tokens: raise SyntaxError("Unexpected end of input")
     first = tokens[0]
-    
+
     if first[0] == 'LPAREN':
         second = peek(tokens, 1)
         if second and second[0] == 'IDENT':
@@ -182,26 +195,26 @@ def parse_expr(tokens):
             if val == 'for': return parse_for(tokens)
             if val == 'while': return parse_while(tokens)
             return parse_func_call(tokens)
-        
-        if second and second[0] in ('NUMBER', 'STRING', 'BOOL', 'LBRACKET', 'LBRACE', 'LPAREN'): 
+
+        if second and second[0] in ('NUMBER', 'STRING', 'BOOL', 'LBRACKET', 'LBRACE', 'LPAREN'):
             return parse_tuple(tokens)
-            
+
         raise SyntaxError(f"Неизвестная конструкция после (: second={second}")
-    
+
     return parse_primary(tokens)
 
 def parse_func_def(tokens):
     expect(tokens, 'LPAREN'); expect(tokens, 'IDENT')
     name = expect(tokens, 'IDENT')[1]; expect(tokens, 'COMMA')
-    expect(tokens, 'LPAREN')  # (
+    expect(tokens, 'LPAREN')
     params = []
     while tokens[0][0] != 'RPAREN':
         params.append(expect(tokens, 'IDENT')[1])
         if tokens[0][0] == 'COMMA': tokens.pop(0)
     expect(tokens, 'RPAREN'); expect(tokens, 'ARROW')
-    
+
     body = parse_expr(tokens)
-    
+
     expect(tokens, 'RPAREN')
     return ('FuncDef', name, params, body)
 
@@ -255,21 +268,19 @@ def parse_func_call(tokens):
     expect(tokens, 'LPAREN')
     func_name = expect(tokens, 'IDENT')[1]
     args = []
-    
-    # Если сразу закрывающая скобка - выходим
+
     if tokens[0][0] == 'RPAREN':
         expect(tokens, 'RPAREN')
         return ('FuncCall', func_name, args)
 
     while tokens[0][0] != 'RPAREN':
         expect(tokens, 'COMMA')
-        
-        # Если после запятой сразу идет закрывающая скобка (висячая запятая), игнорируем её
+
         if tokens[0][0] == 'RPAREN':
             break
-            
+
         args.append(parse_expr(tokens))
-        
+
     expect(tokens, 'RPAREN')
     return ('FuncCall', func_name, args)
 
@@ -280,7 +291,7 @@ def parse_tuple(tokens):
         items.append(parse_expr(tokens))
         while tokens[0][0] == 'COMMA':
             tokens.pop(0)
-            if tokens[0][0] == 'RPAREN': break # Висячая запятая
+            if tokens[0][0] == 'RPAREN': break
             items.append(parse_expr(tokens))
     expect(tokens, 'RPAREN')
     return ('TupleLit', items)
@@ -308,6 +319,9 @@ class MemoryManager:
         self.allocated = set()
         self.lock = threading.Lock()
 
+    def clear(self):
+        self.allocated.clear()
+
     def alloc(self, name):
         with self.lock:
             self.allocated.add(name)
@@ -330,7 +344,10 @@ class Environment:
         raise RuntimeError(f"Переменная '{name}' не найдена")
 
     def set(self, name, value): self.vars[name] = value
-    
+
+    def clear(self):
+        self.memory.clear()
+
     def update(self, name, value):
         if name in self.vars:
             self.vars[name] = value
@@ -338,14 +355,14 @@ class Environment:
             self.parent.update(name, value)
         else:
             raise RuntimeError(f"Переменная '{name}' не найдена для обновления")
-    
+
     def get_func(self, name):
         if name in self.funcs: return self.funcs[name]
         if self.parent: return self.parent.get_func(name)
         return None
-        
+
     def set_func(self, name, data): self.funcs[name] = data
-    
+
     def free_var(self, name):
         if name in self.vars:
             del self.vars[name]
@@ -386,10 +403,10 @@ def krust_invoke_from_python(func_name, *args):
     func_data = GLOBAL_KRUST_ENV.get_func(func_name)
     if not func_data:
         raise RuntimeError(f"Krust function '{func_name}' not found")
-    
+
     params, body, closure_env = func_data
     new_env = Environment(closure_env)
-    
+
     for i, p in enumerate(params):
         if i < len(args):
             py_val = args[i]
@@ -399,7 +416,7 @@ def krust_invoke_from_python(func_name, *args):
             elif isinstance(py_val, float): krust_val = ('Float', py_val)
             else: krust_val = ('String', str(py_val))
             new_env.set(p, krust_val)
-    
+
     try:
         result = evaluate(body, new_env, f"функции '{func_name}' (из Python)")
         return result[1]
@@ -440,7 +457,6 @@ def builtin_import(env, args):
         raise RuntimeError("import принимает строку с именем файла")
     filename = args[0][1]
 
-    # Ищем библиотеку относительно директории интерпретатора
     base_dir = os.path.dirname(os.path.abspath(__file__))
     filepath = os.path.join(base_dir, 'libs', f"{filename}.kr")
 
@@ -452,15 +468,13 @@ def builtin_import(env, args):
 
     ast = parse(code)
 
-    # Создаём ИЗОЛИРОВАННОЕ окружение для библиотеки
-    lib_env = Environment(env)  # parent = env, чтобы видеть внешние переменные
+    lib_env = Environment(env)
 
-    # Локальные __FILENAME__ / __DIRNAME__ — свои у каждой библиотеки
     lib_filename = os.path.basename(filepath)
     lib_dirname  = os.path.dirname(filepath)
     lib_env.set('__FILENAME__', ('String', lib_filename))
     lib_env.set('__DIRNAME__',  ('String', lib_dirname))
-    lib_env.set('__LIBNAME__',  ('String', filename))  # на всякий случай
+    lib_env.set('__LIBNAME__',  ('String', filename))
 
     for node in ast:
         evaluate(node, lib_env, f"импорте '{filename}'")
@@ -471,16 +485,16 @@ def builtin_import(env, args):
 def builtin_py_exec(env, args):
     if len(args) != 1 or args[0][0] != 'String':
         raise RuntimeError("py_exec принимает одну строку с Python кодом")
-    
+
     raw_code = args[0][1]
     python_code = interpolate_string(raw_code, env)
-    
+
     py_globals = {"__builtins__": __builtins__, "krust_call": krust_invoke_from_python}
     for name, (tp, val) in env.vars.items():
         if tp == 'List': py_globals[name] = [v[1] for v in val if v[0] in ('Int', 'Float', 'String', 'Bool')]
         elif tp == 'Json': py_globals[name] = {k: v[1] for k, v in val.items()}
         else: py_globals[name] = val
-            
+
     try:
         result = eval(python_code, py_globals)
         if isinstance(result, str): return ('String', result)
@@ -496,6 +510,290 @@ def builtin_py_exec(env, args):
             raise RuntimeError(f"Python exec error: {e}")
     except Exception as e:
         raise RuntimeError(f"Python eval error: {e}")
+
+# ==========================================
+# 4.1. Tkinter (объединённая поддержка)
+# ==========================================
+class KrustTkinter:
+    def __init__(self):
+        self.root = None
+        self.windows = []
+
+def _parent(value):
+    if isinstance(value, tk.Misc):
+        return value
+    raise RuntimeError("Ожидался TkWindow или TkWidget")
+
+def _is_num(t):
+    return t in ('Int', 'Float')
+
+def _callback(callback, call_krust_value, get_global_env):
+    def run():
+        try:
+            # callback = ('FuncRef', (params, body, closure_env))
+            # Передаём всю пару — предотвращает старую ошибку unpacking.
+            call_krust_value(callback, [], get_global_env())
+        except Exception as exc:
+            print(f"[KRUST Tkinter callback error] {exc}")
+    return run
+
+def _make_widget(factory, args, error, callback=None):
+    if callback is None:
+        widget = factory()
+    else:
+        widget = factory(callback)
+    widget.place(x=int(args[-2][1]), y=int(args[-1][1]))
+    return ('TkWidget', widget)
+
+@krust_builtin('tkinter')
+def builtin_tkinter(env, args):
+    if args:
+        raise RuntimeError('tkinter не принимает аргументы')
+    return ('Tkinter', KrustTkinter())
+
+@krust_builtin('tk_window3')
+def builtin_tk_window3(env, args):
+    if len(args) != 4 or args[0][0] != 'Tkinter' or args[1][0] != 'String' or not _is_num(args[2][0]) or not _is_num(args[3][0]):
+        raise RuntimeError('tk.window("title", width, height)')
+    ctx, title, width, height = args[0][1], args[1][1], args[2][1], args[3][1]
+    root = tk.Tk()
+    root.title(title)
+    root.geometry(f'{int(width)}x{int(height)}')
+    ctx.root = root
+    ctx.windows.append(root)
+    return ('TkWindow', root)
+
+@krust_builtin('tk_label5')
+def builtin_tk_label5(env, args):
+    if len(args) != 5 or args[0][0] != 'Tkinter' or args[1][0] not in ('TkWindow', 'TkWidget') or args[2][0] != 'String' or not _is_num(args[3][0]) or not _is_num(args[4][0]):
+        raise RuntimeError('tk.label(parent, text, x, y)')
+    w = tk.Label(_parent(args[1][1]), text=args[2][1])
+    w.place(x=int(args[3][1]), y=int(args[4][1]))
+    return ('TkWidget', w)
+
+@krust_builtin('tk_button6')
+def builtin_tk_button6(env, args):
+    if len(args) != 6 or args[0][0] != 'Tkinter' or args[1][0] not in ('TkWindow', 'TkWidget') or args[2][0] != 'String' or not _is_num(args[3][0]) or not _is_num(args[4][0]) or args[5][0] != 'FuncRef':
+        raise RuntimeError('tk.button(parent, text, x, y, callback)')
+    w = tk.Button(_parent(args[1][1]), text=args[2][1], command=_callback(args[5], call_krust_value, lambda: GLOBAL_KRUST_ENV))
+    w.place(x=int(args[3][1]), y=int(args[4][1]))
+    return ('TkWidget', w)
+
+def _callback_widget(name, klass, error):
+    @krust_builtin(name)
+    def builtin(env, args):
+        if len(args) != 6 or args[0][0] != 'Tkinter' or args[1][0] not in ('TkWindow', 'TkWidget') or args[2][0] != 'String' or not _is_num(args[3][0]) or not _is_num(args[4][0]) or args[5][0] != 'FuncRef':
+            raise RuntimeError(error)
+        w = klass(_parent(args[1][1]), text=args[2][1], command=_callback(args[5], call_krust_value, lambda: GLOBAL_KRUST_ENV))
+        w.place(x=int(args[3][1]), y=int(args[4][1]))
+        return ('TkWidget', w)
+    return builtin
+
+_callback_widget('tk_checkbutton6', tk.Checkbutton, 'tk.checkbutton(parent, text, x, y, callback)')
+_callback_widget('tk_radiobutton6', tk.Radiobutton, 'tk.radiobutton(parent, text, x, y, callback)')
+
+@krust_builtin('tk_entry4')
+def builtin_tk_entry4(env, args):
+    if len(args) != 4 or args[0][0] != 'Tkinter' or args[1][0] not in ('TkWindow', 'TkWidget') or not _is_num(args[2][0]) or not _is_num(args[3][0]):
+        raise RuntimeError('tk.entry(parent, x, y)')
+    w = tk.Entry(_parent(args[1][1]))
+    w.place(x=int(args[2][1]), y=int(args[3][1]), width=180)
+    return ('TkWidget', w)
+
+@krust_builtin('tk_entry5')
+def builtin_tk_entry5(env, args):
+    if len(args) != 5 or args[0][0] != 'Tkinter' or args[1][0] not in ('TkWindow', 'TkWidget') or not _is_num(args[2][0]) or not _is_num(args[3][0]) or not _is_num(args[4][0]):
+        raise RuntimeError('tk.entry(parent, width, x, y)')
+    w = tk.Entry(_parent(args[1][1]))
+    w.place(x=int(args[3][1]), y=int(args[4][1]), width=int(args[2][1]))
+    return ('TkWidget', w)
+
+@krust_builtin('tk_text6')
+def builtin_tk_text6(env, args):
+    if len(args) != 6 or args[0][0] != 'Tkinter' or args[1][0] not in ('TkWindow', 'TkWidget') or not all(_is_num(a[0]) for a in args[2:]):
+        raise RuntimeError('tk.text(parent, width, height, x, y)')
+    w = tk.Text(_parent(args[1][1]), width=int(args[2][1]), height=int(args[3][1]))
+    w.place(x=int(args[4][1]), y=int(args[5][1]))
+    return ('TkWidget', w)
+
+@krust_builtin('tk_frame6')
+def builtin_tk_frame6(env, args):
+    if len(args) != 6 or args[0][0] != 'Tkinter' or args[1][0] not in ('TkWindow', 'TkWidget') or not all(_is_num(a[0]) for a in args[2:]):
+        raise RuntimeError('tk.frame(parent, width, height, x, y)')
+    w = tk.Frame(_parent(args[1][1]), width=int(args[2][1]), height=int(args[3][1]), bd=1, relief='solid')
+    w.place(x=int(args[4][1]), y=int(args[5][1]))
+    return ('TkWidget', w)
+
+@krust_builtin('tk_listbox5')
+def builtin_tk_listbox5(env, args):
+    if len(args) != 5 or args[0][0] != 'Tkinter' or args[1][0] not in ('TkWindow', 'TkWidget') or not _is_num(args[2][0]) or not _is_num(args[3][0]) or not _is_num(args[4][0]):
+        raise RuntimeError('tk.listbox(parent, width, x, y)')
+    w = tk.Listbox(_parent(args[1][1]), width=int(args[2][1]), height=6)
+    w.place(x=int(args[3][1]), y=int(args[4][1]))
+    return ('TkWidget', w)
+
+@krust_builtin('tk_canvas6')
+def builtin_tk_canvas6(env, args):
+    if len(args) != 6 or args[0][0] != 'Tkinter' or args[1][0] not in ('TkWindow', 'TkWidget') or not all(_is_num(a[0]) for a in args[2:]):
+        raise RuntimeError('tk.canvas(parent, width, height, x, y)')
+    w = tk.Canvas(_parent(args[1][1]), width=int(args[2][1]), height=int(args[3][1]), highlightthickness=1)
+    w.place(x=int(args[4][1]), y=int(args[5][1]))
+    return ('TkWidget', w)
+
+@krust_builtin('tk_scale6')
+def builtin_tk_scale6(env, args):
+    if len(args) != 7 or args[0][0] != 'Tkinter' or args[1][0] not in ('TkWindow', 'TkWidget') or args[2][0] != 'String' or not all(_is_num(a[0]) for a in args[3:]):
+        raise RuntimeError('tk.scale(parent, text, from, to, x, y)')
+    w = tk.Scale(_parent(args[1][1]), label=args[2][1], from_=args[3][1], to=args[4][1], orient='horizontal')
+    w.place(x=int(args[5][1]), y=int(args[6][1]))
+    return ('TkWidget', w)
+
+@krust_builtin('tk_progressbar5')
+def builtin_tk_progressbar5(env, args):
+    if len(args) != 5 or args[0][0] != 'Tkinter' or args[1][0] not in ('TkWindow', 'TkWidget') or not all(_is_num(a[0]) for a in args[2:]):
+        raise RuntimeError('tk.progressbar(parent, width, x, y)')
+    w = ttk.Progressbar(_parent(args[1][1]), orient='horizontal', mode='determinate', length=int(args[2][1]))
+    w.place(x=int(args[3][1]), y=int(args[4][1]))
+    return ('TkWidget', w)
+
+@krust_builtin('tk_combobox5')
+def builtin_tk_combobox5(env, args):
+    if len(args) != 5 or args[0][0] != 'Tkinter' or args[1][0] not in ('TkWindow', 'TkWidget') or args[2][0] != 'List' or not _is_num(args[3][0]) or not _is_num(args[4][0]):
+        raise RuntimeError('tk.combobox(parent, items, x, y)')
+    values = [v[1] for v in args[2][1] if v[0] == 'String']
+    w = ttk.Combobox(_parent(args[1][1]), values=values)
+    w.place(x=int(args[3][1]), y=int(args[4][1]), width=180)
+    return ('TkWidget', w)
+
+@krust_builtin('tk_separator4')
+def builtin_tk_separator4(env, args):
+    if len(args) != 4 or args[0][0] != 'Tkinter' or args[1][0] not in ('TkWindow', 'TkWidget') or not _is_num(args[2][0]) or not _is_num(args[3][0]):
+        raise RuntimeError('tk.separator(parent, x, y)')
+    w = ttk.Separator(_parent(args[1][1]), orient='horizontal')
+    w.place(x=int(args[2][1]), y=int(args[3][1]), width=180)
+    return ('TkWidget', w)
+
+@krust_builtin('tk_message3')
+def builtin_tk_message3(env, args):
+    if len(args) != 3 or args[0][0] != 'Tkinter' or args[1][0] != 'TkWindow' or args[2][0] != 'String':
+        raise RuntimeError('tk.message(win, text)')
+    messagebox.showinfo('Krust', args[2][1], parent=args[1][1])
+    return ('Void', None)
+
+@krust_builtin('tk_warning3')
+def builtin_tk_warning3(env, args):
+    if len(args) != 3 or args[0][0] != 'Tkinter' or args[1][0] != 'TkWindow' or args[2][0] != 'String':
+        raise RuntimeError('tk.warning(win, text)')
+    messagebox.showwarning('Krust', args[2][1], parent=args[1][1])
+    return ('Void', None)
+
+@krust_builtin('tk_error3')
+def builtin_tk_error3(env, args):
+    if len(args) != 3 or args[0][0] != 'Tkinter' or args[1][0] != 'TkWindow' or args[2][0] != 'String':
+        raise RuntimeError('tk.error(win, text)')
+    messagebox.showerror('Krust', args[2][1], parent=args[1][1])
+    return ('Void', None)
+
+@krust_builtin('tk_askyesno3')
+def builtin_tk_askyesno3(env, args):
+    if len(args) != 3 or args[0][0] != 'Tkinter' or args[1][0] != 'TkWindow' or args[2][0] != 'String':
+        raise RuntimeError('tk.askyesno(win, text)')
+    return ('Bool', messagebox.askyesno('Krust', args[2][1], parent=args[1][1]))
+
+@krust_builtin('tk_title2')
+def builtin_tk_title2(env, args):
+    if len(args) != 2 or args[0][0] != 'TkWindow' or args[1][0] != 'String':
+        raise RuntimeError('tk.title(win, text)')
+    args[0][1].title(args[1][1])
+    return ('Void', None)
+
+@krust_builtin('tk_geometry4')
+def builtin_tk_geometry4(env, args):
+    if len(args) != 3 or args[0][0] != 'TkWindow' or not _is_num(args[1][0]) or not _is_num(args[2][0]):
+        raise RuntimeError('tk.geometry(win, width, height)')
+    args[0][1].geometry(f'{int(args[1][1])}x{int(args[2][1])}')
+    return ('Void', None)
+
+@krust_builtin('tk_destroy1')
+def builtin_tk_destroy1(env, args):
+    if len(args) != 1 or args[0][0] not in ('TkWindow', 'TkWidget'):
+        raise RuntimeError('tk.destroy(object)')
+    args[0][1].destroy()
+    return ('Void', None)
+
+@krust_builtin('tk_get1')
+def builtin_tk_get1(env, args):
+    if len(args) != 1 or args[0][0] != 'TkWidget':
+        raise RuntimeError('tk.get(widget)')
+    w = args[0][1]
+    if isinstance(w, tk.Entry):
+        return ('String', w.get())
+    if isinstance(w, tk.Text):
+        return ('String', w.get('1.0', 'end-1c'))
+    if isinstance(w, tk.Listbox):
+        selected = w.curselection()
+        return ('String', w.get(selected[0]) if selected else '')
+    if isinstance(w, ttk.Combobox):
+        return ('String', w.get())
+    if isinstance(w, tk.Scale):
+        return ('Float', float(w.get()))
+    raise RuntimeError('Этот виджет не поддерживает tk.get')
+
+@krust_builtin('tk_set1')
+def builtin_tk_set1(env, args):
+    if len(args) != 2 or args[0][0] != 'TkWidget' or args[1][0] not in ('String', 'Int', 'Float'):
+        raise RuntimeError('tk.set(widget, value)')
+    w, value = args[0][1], str(args[1][1])
+    if isinstance(w, tk.Entry):
+        w.delete(0, 'end'); w.insert(0, value)
+    elif isinstance(w, tk.Text):
+        w.delete('1.0', 'end'); w.insert('1.0', value)
+    elif isinstance(w, ttk.Combobox):
+        w.set(value)
+    elif isinstance(w, tk.Scale):
+        w.set(float(value))
+    elif isinstance(w, ttk.Progressbar):
+        w['value'] = float(value)
+    else:
+        try: w.configure(text=value)
+        except tk.TclError: raise RuntimeError('Этот виджет не поддерживает tk.set')
+    return ('Void', None)
+
+@krust_builtin('tk_list_add2')
+def builtin_tk_list_add2(env, args):
+    if len(args) != 2 or args[0][0] != 'TkWidget' or args[1][0] != 'String' or not isinstance(args[0][1], tk.Listbox):
+        raise RuntimeError('tk.list_add(listbox, text)')
+    args[0][1].insert('end', args[1][1])
+    return ('Void', None)
+
+@krust_builtin('tk_canvas_line6')
+def builtin_tk_canvas_line6(env, args):
+    if len(args) != 6 or args[0][0] != 'TkWidget' or not isinstance(args[0][1], tk.Canvas) or not all(_is_num(a[0]) for a in args[1:]):
+        raise RuntimeError('tk.canvas_line(canvas, x1, y1, x2, y2)')
+    args[0][1].create_line(int(args[1][1]), int(args[2][1]), int(args[3][1]), int(args[4][1]))
+    return ('Void', None)
+
+@krust_builtin('tk_open_file2')
+def builtin_tk_open_file2(env, args):
+    if len(args) != 2 or args[0][0] != 'TkWindow' or args[1][0] != 'String':
+        raise RuntimeError('tk.open_file(win, title)')
+    return ('String', filedialog.askopenfilename(parent=args[0][1], title=args[1][1]))
+
+@krust_builtin('tk_color2')
+def builtin_tk_color2(env, args):
+    if len(args) != 2 or args[0][0] != 'TkWindow' or args[1][0] != 'String':
+        raise RuntimeError('tk.color(win, title)')
+    return ('String', colorchooser.askcolor(title=args[1][1], parent=args[0][1])[1] or '')
+
+@krust_builtin('tk_mainloop')
+def builtin_tk_mainloop(env, args):
+    if len(args) != 1 or args[0][0] != 'Tkinter':
+        raise RuntimeError('tk.mainloop()')
+    ctx = args[0][1]
+    if ctx.root is None:
+        raise RuntimeError('Сначала создайте окно через tk.window(...)')
+    ctx.root.mainloop()
+    return ('Void', None)
 
 # --- Математика ---
 @krust_builtin("+")
@@ -538,6 +836,28 @@ def builtin_mod(env, args):
     if t1 != 'Int' or t2 != 'Int': raise RuntimeError("% работает только с Int")
     if v2 == 0: raise RuntimeError("Деление на ноль")
     return ('Int', v1 % v2)
+
+@krust_builtin("round")
+def builtin_round(env, args):
+    if len(args) < 1 or len(args) > 2:
+        raise RuntimeError("round требует 1 или 2 аргумента: (число[, кол-во знаков])")
+
+    t1, v1 = args[0]
+    if t1 not in ('Int', 'Float'):
+        raise RuntimeError(f"round: первый аргумент должен быть числом, получен {t1}")
+
+    if len(args) == 2:
+        t2, v2 = args[1]
+        if t2 != 'Int':
+            raise RuntimeError("round: кол-во знаков должно быть Int")
+        result = round(v1, v2)
+    else:
+        result = round(v1)
+
+    if isinstance(result, int):
+        return ('Int', result)
+    else:
+        return ('Float', result)
 
 # --- Строки ---
 @krust_builtin("str_concat")
@@ -594,14 +914,14 @@ def builtin_list_length(env, args):
 
 @krust_builtin("in_list")
 def builtin_in_list(env, args):
-    if len(args) != 2: 
+    if len(args) != 2:
         raise RuntimeError("in_list требует 2 аргумента")
     check_t, check = args[0]
     t, lst = args[1]
-    if t != 'List': 
+    if t != 'List':
         raise RuntimeError("in_list работает только с типом List")
     return ('Bool', (check_t, check) in lst)
-    
+
 @krust_builtin("tuple_get")
 def builtin_tuple_get(env, args):
     if len(args) != 2: raise RuntimeError("tuple_get требует 2 аргумента")
@@ -611,13 +931,11 @@ def builtin_tuple_get(env, args):
     if idx < 0 or idx >= len(tup): raise RuntimeError(f"Индекс {idx} вне диапазона")
     return tup[idx]
 
-# --- Функции высшего порядка (Коллбэки в Krust) ---
-
+# --- Функции высшего порядка ---
 def call_krust_value(func_node, args_vals, env):
     """Универсальный вызов значения, которое может быть функцией или ссылкой на неё"""
     t, v = func_node
-    
-    # Если это идентификатор, resolvим его
+
     if t == 'Ident':
         try:
             resolved = env.get(v)
@@ -627,23 +945,20 @@ def call_krust_value(func_node, args_vals, env):
             if func_data:
                 return call_krust_value(('FuncRef', func_data), args_vals, env)
             raise RuntimeError(f"'{v}' не найдено")
-            
-    # Если это ссылка на функцию (FuncRef)
+
     if t == 'FuncRef':
         params, body, closure_env = v
         if len(params) != len(args_vals):
             raise RuntimeError(f"Функция ожидает {len(params)} аргументов, передано {len(args_vals)}")
-        
+
         new_env = Environment(closure_env)
         for p, val in zip(params, args_vals):
             new_env.set(p, val)
-            
+
         try:
-            # evaluate возвращает результат последнего выражения в блоке
             res = evaluate(body, new_env, "<callback>")
             return res
         except ReturnException as e:
-            # Если был return, берем его значение
             return e.value
         except KrustError:
             raise
@@ -658,28 +973,22 @@ def builtin_map(env, args):
     func_arg = args[0]
     list_arg = args[1]
     if list_arg[0] != 'List': raise RuntimeError("Второй аргумент map должен быть List")
-    
+
     lst = list_arg[1]
     result = []
-    print(f"MAP: {lst}")
     for item in lst:
-        # item - это уже кортеж (type, val), например ('Int', 1)
         res = call_krust_value(func_arg, [item], env)
-        # res - это тоже кортеж (type, val), например ('Int', 2)
-        print(item + ":")
-
         result.append(res)
-        
+
     return ('List', result)
 
 @krust_builtin("filter")
 def builtin_filter(env, args):
-    """ filter(func, list) -> возвращает список элементов, где func вернул true """
     if len(args) != 2: raise RuntimeError("filter требует 2 аргумента: (func, list)")
     func_arg = args[0]
     list_arg = args[1]
     if list_arg[0] != 'List': raise RuntimeError("Второй аргумент filter должен быть List")
-    
+
     lst = list_arg[1]
     result = []
     for item in lst:
@@ -719,8 +1028,7 @@ def builtin_json_to_string(env, args):
         return None
     return ('String', json_module.dumps(convert(obj)))
 
-# --- FFI и Коллбэки (C <-> Krust) ---
-
+# --- FFI ---
 _active_ffi_callbacks = {}
 
 KRUST_TO_C_TYPE = {
@@ -728,50 +1036,43 @@ KRUST_TO_C_TYPE = {
     'Float': c_double,
     'String': c_char_p,
     'Bool': c_int,
+    'Bytes': c_char_p,
     'Void': None
 }
 
 @krust_builtin("ffi_exec")
 def builtin_ffi_exec(env, args):
-    """
-    ffi_exec(path, func_name, arg_types_list, return_type, args_values_list)
-    Поддерживает передачу функций Krust как коллбэков (тип аргумента 'Func').
-    """
     if len(args) != 5:
         raise RuntimeError("ffi_exec требует 5 аргументов")
-        
+
     path_t, path = args[0]
     func_name_t, func_name = args[1]
-    arg_types_t, arg_types_list = args[2] # List of ('String', 'Int')...
+    arg_types_t, arg_types_list = args[2]
     ret_type_t, ret_type = args[3]
-    values_t, values_list = args[4] # List of actual values
-    
+    values_t, values_list = args[4]
+
     if path_t != 'String' or func_name_t != 'String':
         raise RuntimeError("Путь и имя функции должны быть строками")
     if arg_types_t != 'List' or values_t != 'List':
         raise RuntimeError("Типы и значения должны быть списками")
     if len(arg_types_list) != len(values_list):
         raise RuntimeError("Несовпадение количества типов и значений")
-        
+
     try:
         lib = ctypes.CDLL(path)
         func = getattr(lib, func_name)
-        
+
         c_arg_types = []
         c_args = []
-        
+
         for i, type_node in enumerate(arg_types_list):
             t, type_name = type_node
             val_node = values_list[i]
             v_t, v_val = val_node
-            
-            # Обработка коллбэков (передача функции Krust в C)
+
             if type_name == 'Func':
-                # Создаем C-совместимую обертку. 
-                # ВАЖНО: Для простоты здесь реализован коллбэк сигнатуры int -> int.
-                # В продакшене нужно парсить сигнатуру коллбэка отдельно.
                 CB_TYPE = CFUNCTYPE(c_int, c_int)
-                
+
                 def make_cb_wrapper(krust_func_node):
                     def c_callback(c_arg):
                         try:
@@ -782,27 +1083,26 @@ def builtin_ffi_exec(env, args):
                             print(f"[FFI CB Error]: {e}")
                             return 0
                     return c_callback
-                
+
                 wrapper = make_cb_wrapper(val_node)
                 c_cb = CB_TYPE(wrapper)
-                _active_ffi_callbacks[id(c_cb)] = c_cb # Сохраняем от GC
-                
+                _active_ffi_callbacks[id(c_cb)] = c_cb
+
                 c_arg_types.append(CB_TYPE)
                 c_args.append(c_cb)
-                
+
             else:
                 c_type = KRUST_TO_C_TYPE.get(type_name)
                 if c_type is None: raise RuntimeError(f"Неизвестный тип FFI: {type_name}")
                 c_arg_types.append(c_type)
-                
+
                 if type_name == 'Int': c_args.append(c_int(v_val))
                 elif type_name == 'Float': c_args.append(c_double(v_val))
                 elif type_name == 'String': c_args.append(c_char_p(v_val.encode('utf-8')))
                 elif type_name == 'Bool': c_args.append(c_int(1 if v_val else 0))
-                
+
         func.argtypes = c_arg_types
-        
-        # Return type handling
+
         if ret_type == 'Void':
             func.restype = None
             func(*c_args)
@@ -817,12 +1117,14 @@ def builtin_ffi_exec(env, args):
             func.restype = c_char_p
             res = func(*c_args)
             return ('String', res.decode('utf-8') if res else "")
+        elif type_name == 'Bytes': 
+            c_args.append(c_char_p(v_val)) 
         elif ret_type == 'Bool':
             func.restype = c_int
             return ('Bool', bool(func(*c_args)))
         else:
             raise RuntimeError(f"Неподдерживаемый тип возврата: {ret_type}")
-            
+
     except Exception as e:
         raise RuntimeError(f"FFI ошибка: {e}")
 
@@ -850,7 +1152,7 @@ def builtin_thread(env, args):
     if func_name_t != 'String':
         raise RuntimeError("Первый аргумент thread должен быть строкой")
     py_args = [arg[1] for arg in args[1:]]
-    
+
     def thread_target():
         try:
             krust_invoke_from_python(func_name, *py_args)
@@ -896,7 +1198,7 @@ def builtin_exec_krust_func(env, args):
         raise RuntimeError("Имя функции должно быть String")
     py_args = [arg[1] for arg in args[1:]]
     result = krust_invoke_from_python(func, *py_args)
-    
+
     if result is None: return ('Void', None)
     elif isinstance(result, str): return ('String', result)
     elif isinstance(result, bool): return ('Bool', result)
@@ -917,36 +1219,123 @@ def builtin_raise(env, args):
 
     raise KrustError(error, "<raise>")
 
+# ==========================================
+# --- Bytes Operations ---
+# ==========================================
+
+@krust_builtin("bytes_from_string")
+def builtin_bytes_from_string(env, args):
+    """Преобразует String в Bytes (UTF-8)"""
+    if len(args) != 1: raise RuntimeError("bytes_from_string требует 1 аргумент")
+    t, v = args[0]
+    if t != 'String': raise RuntimeError("Аргумент должен быть String")
+    return ('Bytes', v.encode('utf-8'))
+
+@krust_builtin("bytes_to_string")
+def builtin_bytes_to_string(env, args):
+    """Преобразует Bytes в String (UTF-8)"""
+    if len(args) != 1: raise RuntimeError("bytes_to_string требует 1 аргумент")
+    t, v = args[0]
+    if t != 'Bytes': raise RuntimeError("Аргумент должен быть Bytes")
+    try:
+        return ('String', v.decode('utf-8'))
+    except UnicodeDecodeError:
+        raise RuntimeError("Невозможно декодировать байты в UTF-8 строку")
+
+@krust_builtin("bytes_length")
+def builtin_bytes_length(env, args):
+    """Возвращает длину байтовой последовательности"""
+    if len(args) != 1: raise RuntimeError("bytes_length требует 1 аргумент")
+    t, v = args[0]
+    if t != 'Bytes': raise RuntimeError("Аргумент должен быть Bytes")
+    return ('Int', len(v))
+
+@krust_builtin("bytes_concat")
+def builtin_bytes_concat(env, args):
+    """Объединяет две байтовые последовательности"""
+    if len(args) != 2: raise RuntimeError("bytes_concat требует 2 аргумента")
+    t1, v1 = args[0]
+    t2, v2 = args[1]
+    if t1 != 'Bytes' or t2 != 'Bytes': raise RuntimeError("Оба аргумента должны быть Bytes")
+    return ('Bytes', v1 + v2)
+
+@krust_builtin("bytes_slice")
+def builtin_bytes_slice(env, args):
+    """Возвращает срез байтов: bytes_slice(bytes, start, end)"""
+    if len(args) != 3: raise RuntimeError("bytes_slice требует 3 аргумента")
+    t, v = args[0]
+    if t != 'Bytes': raise RuntimeError("Первый аргумент должен быть Bytes")
+    
+    t_start, start = args[1]
+    t_end, end = args[2]
+    if t_start != 'Int' or t_end != 'Int': raise RuntimeError("Индексы должны быть Int")
+    
+    return ('Bytes', v[start:end])
+
+@krust_builtin("bytes_get")
+def builtin_bytes_get(env, args):
+    """Получает байт по индексу (возвращает Int)"""
+    if len(args) != 2: raise RuntimeError("bytes_get требует 2 аргумента")
+    t, v = args[0]
+    idx_t, idx = args[1]
+    if t != 'Bytes': raise RuntimeError("Первый аргумент должен быть Bytes")
+    if idx_t != 'Int': raise RuntimeError("Индекс должен быть Int")
+    if idx < 0 or idx >= len(v): raise RuntimeError(f"Индекс {idx} вне диапазона")
+    return ('Int', v[idx])
+
+@krust_builtin("hex_to_bytes")
+def builtin_hex_to_bytes(env, args):
+    """Преобразует hex-строку в Bytes"""
+    if len(args) != 1: raise RuntimeError("hex_to_bytes требует 1 аргумент")
+    t, v = args[0]
+    if t != 'String': raise RuntimeError("Аргумент должен быть String (hex)")
+    try:
+        # Удаляем возможные пробелы и 0x префиксы если нужно, но пока просто чистый hex
+        clean_v = v.replace(" ", "").replace("0x", "")
+        return ('Bytes', bytes.fromhex(clean_v))
+    except ValueError as e:
+        raise RuntimeError(f"Ошибка конвертации Hex: {e}")
+
+@krust_builtin("bytes_to_hex")
+def builtin_bytes_to_hex(env, args):
+    """Преобразует Bytes в hex-строку"""
+    if len(args) != 1: raise RuntimeError("bytes_to_hex требует 1 аргумент")
+    t, v = args[0]
+    if t != 'Bytes': raise RuntimeError("Аргумент должен быть Bytes")
+    return ('String', v.hex())
+
 # --- Конвертация типов ---
 @krust_builtin("to_string")
 def builtin_to_string(env, args):
     if len(args) != 1: raise RuntimeError("to_string требует 1 аргумент")
     t, v = args[0]
-    
+
     if t == 'String': return ('String', v)
     elif t in ('Int', 'Float'): return ('String', str(v))
     elif t == 'Bool': return ('String', 'true' if v else 'false')
     elif t == 'Void': return ('String', 'void')
-    
+
     elif t == 'List':
         parts = []
-        for item in v: # item is ('Int', 2)
-            # Вызываем to_string рекурсивно для каждого элемента
+        for item in v:
             s = builtin_to_string(env, [item])
             parts.append(s[1])
         return ('String', '[' + ', '.join(parts) + ']')
-        
+
     elif t == 'Tuple':
         parts = []
         for item in v:
             s = builtin_to_string(env, [item])
             parts.append(s[1])
         return ('String', '(' + ', '.join(parts) + ')')
-        
-    elif t == 'Json': 
+
+    elif t == 'Json':
         return builtin_json_to_string(env, args)
-        
-    else: 
+
+    elif t == 'Bytes':
+        return ('String', '<Bytes:' + v.hex() + '>') 
+
+    else:
         raise RuntimeError(f"to_string не поддерживает тип {t}")
 
 @krust_builtin("to_int")
@@ -1122,6 +1511,11 @@ def convert_krust_value_to_python(krust_value):
     elif tp == 'Int': return val
     elif tp == 'Float': return val
     elif tp == 'Bool': return val
+    
+    # --- ДОБАВИТЬ ЭТО ---
+    elif tp == 'Bytes': return val
+    # -------------------
+    
     elif tp == 'List': return convert_krust_list_to_python(val)
     elif tp == 'Json': return convert_krust_json_to_python(val)
     elif tp == 'Void': return None
@@ -1133,6 +1527,11 @@ def convert_python_to_krust(py_value):
     elif isinstance(py_value, bool): return ('Bool', py_value)
     elif isinstance(py_value, int): return ('Int', py_value)
     elif isinstance(py_value, float): return ('Float', py_value)
+    
+    # --- ДОБАВИТЬ ЭТО ---
+    elif isinstance(py_value, bytes): return ('Bytes', py_value)
+    # -------------------
+    
     elif isinstance(py_value, list): return ('List', [convert_python_to_krust(item) for item in py_value])
     elif isinstance(py_value, dict):
         result = {}
@@ -1153,7 +1552,7 @@ def builtin_request(env, args):
     valid_methods = {'GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD'}
     if method not in valid_methods:
         raise RuntimeError(f"Неверный метод: {method}. Допустимые: {', '.join(valid_methods)}")
-    
+
     data = None; json_data = None
     if len(args) > 2:
         data_t, data_val = args[2]
@@ -1162,16 +1561,16 @@ def builtin_request(env, args):
         elif data_t == 'String': data = data_val
         elif data_t in ('Int', 'Float', 'Bool'): data = str(data_val)
         elif data_t != 'Void': raise RuntimeError(f"Неподдерживаемый тип данных: {data_t}")
-    
+
     headers = {}
     if len(args) > 3:
         headers_t, headers_val = args[3]
         if headers_t == 'Json': headers = convert_krust_json_to_python(headers_val)
         elif headers_t != 'Void': raise RuntimeError("Заголовки должны быть Json или Void")
-    
+
     if json_data is not None and 'Content-Type' not in headers:
         headers['Content-Type'] = 'application/json'
-    
+
     try:
         response = None
         if method == 'GET': response = requests.get(url, headers=headers, timeout=30)
@@ -1188,7 +1587,7 @@ def builtin_request(env, args):
             if json_data is not None: response = requests.patch(url, json=json_data, headers=headers, timeout=30)
             else: response = requests.patch(url, data=data, headers=headers, timeout=30)
         elif method == 'HEAD': response = requests.head(url, headers=headers, timeout=30)
-        
+
         body_krust = ('String', response.text)
         content_type = response.headers.get('Content-Type', '').lower()
         if 'application/json' in content_type:
@@ -1196,11 +1595,11 @@ def builtin_request(env, args):
                 body = response.json()
                 body_krust = convert_python_to_krust(body)
             except: pass
-        
+
         result_headers = {}
         for key, value in response.headers.items():
             result_headers[key] = ('String', str(value))
-        
+
         result = {
             'status': ('Int', response.status_code),
             'headers': ('Json', result_headers),
@@ -1208,7 +1607,7 @@ def builtin_request(env, args):
             'error': ('Void', None)
         }
         return ('Json', result)
-        
+
     except requests.exceptions.Timeout:
         return ('Json', {'status': ('Int', 0), 'headers': ('Json', {}), 'body': ('String', ''), 'error': ('String', 'Timeout')})
     except requests.exceptions.ConnectionError:
@@ -1223,19 +1622,19 @@ def builtin_wget(env, args):
     if len(args) < 1: raise RuntimeError("wget требует минимум 1 аргумент (URL)")
     url_t, url = args[0]
     if url_t != 'String': raise RuntimeError("Первый аргумент должен быть String (URL)")
-    
+
     filename = None
     if len(args) > 1:
         filename_t, filename_val = args[1]
         if filename_t != 'String': raise RuntimeError("Второй аргумент должен быть String (путь сохранения)")
         filename = filename_val
-    
+
     headers = {}
     if len(args) > 2:
         headers_t, headers_val = args[2]
         if headers_t == 'Json': headers = convert_krust_json_to_python(headers_val)
         elif headers_t != 'Void': raise RuntimeError("Заголовки должны быть Json или Void")
-    
+
     if filename is None:
         parsed_url = urllib.parse.urlparse(url)
         filename = os.path.basename(parsed_url.path)
@@ -1244,22 +1643,22 @@ def builtin_wget(env, args):
     if not filename or '.' not in filename:
         filename = filename or "download"
         filename += ".bin"
-    
+
     filename = os.path.abspath(filename)
     os.makedirs(os.path.dirname(filename) if os.path.dirname(filename) else '.', exist_ok=True)
-    
+
     print(f"\nСкачивание: {url}")
     print(f"Сохранение: {filename}")
-    
+
     downloaded = 0; total_size = 0; start_time = time.time()
     temp_filename = filename + ".tmp"
     connection_lost = False; error_message = None
-    
+
     try:
         response = requests.get(url, headers=headers, stream=True, timeout=30)
         response.raise_for_status()
         total_size = int(response.headers.get('content-length', 0))
-        
+
         if os.path.exists(filename):
             if total_size > 0 and os.path.getsize(filename) == total_size:
                 print(f"Файл уже существует: {filename}")
@@ -1268,7 +1667,7 @@ def builtin_wget(env, args):
             counter = 1
             while os.path.exists(f"{base}_{counter}{ext}"): counter += 1
             filename = f"{base}_{counter}{ext}"
-        
+
         with open(temp_filename, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
@@ -1287,11 +1686,11 @@ def builtin_wget(env, args):
                         downloaded_mb = downloaded / (1024 * 1024)
                         sys.stdout.write(f'\rСкачано: {downloaded_mb:.2f} MB    ')
                     sys.stdout.flush()
-        
+
         if os.path.exists(temp_filename):
             if os.path.exists(filename): os.remove(filename)
             os.rename(temp_filename, filename)
-        
+
         elapsed = time.time() - start_time
         if total_size > 0:
             downloaded_mb = downloaded / (1024 * 1024); total_mb = total_size / (1024 * 1024)
@@ -1302,18 +1701,18 @@ def builtin_wget(env, args):
             downloaded_mb = downloaded / (1024 * 1024)
             sys.stdout.write(f'\rСкачано: {downloaded_mb:.2f} MB за {elapsed:.1f}s\n')
         sys.stdout.flush()
-        
+
         if os.path.exists(filename) and os.path.getsize(filename) > 0:
             print(f"Файл успешно сохранён: {filename} ({downloaded} байт)")
             return ('Json', {'success': ('Bool', True), 'filename': ('String', filename), 'size': ('Int', downloaded), 'time': ('Float', elapsed), 'message': ('String', f'Файл успешно скачан за {elapsed:.1f} секунд'), 'error': ('Void', None)})
         else: raise RuntimeError("Файл не был сохранён")
-            
+
     except requests.exceptions.Timeout: error_message = "Timeout"; connection_lost = True
     except requests.exceptions.ConnectionError: error_message = "Connection Error"; connection_lost = True
     except requests.exceptions.HTTPError as e: error_message = f"HTTP Error {e.response.status_code}"; connection_lost = True
     except requests.exceptions.RequestException as e: error_message = f"Request Error: {str(e)}"; connection_lost = True
     except Exception as e: error_message = f"Unknown Error: {str(e)}"; connection_lost = True
-    
+
     if connection_lost:
         if os.path.exists(temp_filename):
             try: os.remove(temp_filename)
@@ -1344,10 +1743,8 @@ def builtin_reg_match(env, args):
 
     matched = re.match(reg, string)
     if not matched:
-        return ('List', [])  # пустой список — совпадений нет
+        return ('List', [])
 
-    # matched.groups() — только группы (без всего совпадения)
-    # matched.group(0) — всё совпадение
     groups = [matched.group(0)] + list(matched.groups())
     return ('List', [('String', g) for g in groups if g is not None])
 
@@ -1360,34 +1757,30 @@ def evaluate(node, env, current_frame="<main>"):
         if node[0] == 'IntLit': return ('Int', node[1])
         if node[0] == 'FloatLit': return ('Float', node[1])
         if node[0] == 'BoolLit': return ('Bool', node[1])
-        
+
         if node[0] == 'ListLit': return ('List', [evaluate(item, env, current_frame) for item in node[1]])
         if node[0] == 'TupleLit': return ('Tuple', [evaluate(item, env, current_frame) for item in node[1]])
         if node[0] == 'JsonLit': return ('Json', {key: evaluate(val_node, env, current_frame) for key, val_node in node[1]})
-        
-        if node[0] == 'Ident': 
+
+        if node[0] == 'Ident':
             name = node[1]
-            # Сначала пробуем получить переменную
             try:
                 return env.get(name)
             except RuntimeError:
-                # Если переменной нет, проверяем, не функция ли это
                 func_data = env.get_func(name)
                 if func_data:
                     return ('FuncRef', func_data)
-                # Если ни переменная, ни функция не найдены - пробрасываем ошибку
                 raise RuntimeError(f"Переменная или функция '{name}' не найдена")
 
         if node[0] == 'VarDecl':
             _, type_name, var_name, value_node = node
             val_type, val = evaluate(value_node, env, current_frame)
-            
-            # Разрешаем объявлять переменные типа Func
+
             if type_name == 'Func' and val_type == 'FuncRef':
                  env.set(var_name, val)
                  return ('Void', None)
-                 
-            if val_type != type_name:
+
+            if type_name != 'Any' and val_type != type_name:
                 raise RuntimeError(f"Ошибка типизации: ожидался {type_name}, получено {val_type}")
             env.set(var_name, (val_type, val))
             env.memory.alloc(var_name)
@@ -1421,7 +1814,7 @@ def evaluate(node, env, current_frame="<main>"):
             iter_type, iter_val = evaluate(iterable_node, env, current_frame)
             if iter_type not in ('List', 'Tuple'):
                 raise RuntimeError(f"for работает только с List или Tuple, получен {iter_type}")
-            
+
             result = ('Void', None)
             for item in iter_val:
                 loop_env = Environment(env)
@@ -1457,15 +1850,12 @@ def evaluate(node, env, current_frame="<main>"):
 
         if node[0] == 'FuncCall':
             _, name, args = node
-            
-            # Проверяем, является ли name встроенной функцией
+
             if name in BUILTINS:
                 return BUILTINS[name](env, [evaluate(arg, env, current_frame) for arg in args])
 
-            # Проверяем, является ли name определенной пользователем функцией
             func_data = env.get_func(name)
-            
-            # Если нет, возможно, это переменная, содержащая FuncRef (коллбэк)
+
             if not func_data:
                 try:
                     val = env.get(name)
@@ -1475,7 +1865,7 @@ def evaluate(node, env, current_frame="<main>"):
                         raise RuntimeError(f"'{name}' не является функцией или коллбэком")
                 except RuntimeError:
                     raise RuntimeError(f"Функция '{name}' не определена")
-                
+
             params, body, closure_env = func_data
             if len(params) != len(args):
                 raise RuntimeError(f"Функция '{name}' ожидает {len(params)} аргументов, передано {len(args)}")
@@ -1484,7 +1874,7 @@ def evaluate(node, env, current_frame="<main>"):
             evaluated_args = []
             for a in args:
                 evaluated_args.append(evaluate(a, env, current_frame))
-            
+
             for p, val in zip(params, evaluated_args):
                 new_env.set(p, val)
 
@@ -1497,7 +1887,7 @@ def evaluate(node, env, current_frame="<main>"):
                 raise
 
         raise RuntimeError(f"Неизвестный узел AST: {node}")
-        
+
     except KrustError:
         raise
     except Exception as e:
@@ -1561,6 +1951,7 @@ def run_krust(code, main_filename=None, main_dirname=None, main_libname=None):
         env.set('__LIBNAME__',  ('String', main_libname))
 
     env.set('OS', ('String', platform.system()))
+    env.set('PATH_SEP', ('String', os.sep))
 
     try:
         ast = parse(code)
@@ -1583,37 +1974,40 @@ def run_repl():
     env.set('__DIRNAME__',  ('String', '*repl'))
     env.set('__LIBNAME__',  ('String', '*repl'))
     env.set('OS', ('String', platform.system()))
+    env.set('PATH_SEP', ('String', os.sep))
 
     buffer = []
-    while True:
-        prompt = "REPL> " if not buffer else "...   "
-        try:
-            line = input(prompt)
-        except EOFError:
-            break
+    try:
+        while True:
+            prompt = "REPL> " if not buffer else "...   "
+            try:
+                line = input(prompt)
+            except EOFError:
+                break
 
-        if not buffer and line.lower().strip() == "exit":
-            break
+            if not buffer and line.lower().strip() == "exit":
+                break
 
-        buffer.append(line)
-        code = "\n".join(buffer)
+            buffer.append(line)
+            code = "\n".join(buffer)
 
-        # Если скобки не сбалансированы — ждём продолжения
-        if _bracket_balance(code) > 0:
-            continue
+            if _bracket_balance(code) > 0:
+                continue
 
-        buffer.clear()
+            buffer.clear()
 
-        try:
-            ast = parse(code)
-            for node in ast:
-                evaluate(node, env, "<main>")
-        except SyntaxError as e:
-            print(f"\n[SYNTAX ERROR] {e}")
-        except KrustError as e:
-            print(e)
-        except Exception as e:
-            print(f"[KRUST ERROR] Неожиданная ошибка Python: {e}")
+            try:
+                ast = parse(code)
+                for node in ast:
+                    evaluate(node, env, "<main>")
+            except SyntaxError as e:
+                print(f"\n[SYNTAX ERROR] {e}")
+            except KrustError as e:
+                print(e)
+            except Exception as e:
+                print(f"[KRUST ERROR] Неожиданная ошибка Python: {e}")
+    except KeyboardInterrupt:
+        exit(1)
 
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser('Krust Language', description='A Functional Programming Language')
