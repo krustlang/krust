@@ -1,5 +1,11 @@
-(List m => (reg_match, "(\d+)-(\d+)", "12-34"))
+(Any tk => (tkinter))
 
-(if, (==, (list_get, m, 0), "12-34"), (
-    (raise, "Депутат")
-))
+(func on_click, () =>
+    (tk_message3, tk, win, "Кнопка нажата ГГГГ!")
+)
+
+(Any win => (tk_window3, tk, "Моё окно", 500, 300))
+
+(tk_label5, tk, win, "Привет из Krust!", 20, 20)
+(tk_button6, tk, win, "Нажми", 20, 60, on_click)
+(tk_mainloop, tk)
