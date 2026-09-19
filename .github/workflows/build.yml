@@ -1,0 +1,156 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:  # ручной запуск из интерфейса GitHub
+
+permissions:
+  contents: write     # нужно для создания релиза
+
+jobs:
+  # ============================================================
+  # СБОРКА
+  # ============================================================
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---------- Windows ----------
+          - os: windows-latest
+            target: windows-x64
+            arch: x86_64
+            python-arch: x64
+            ext: .exe
+          - os: windows-latest
+            target: windows-x86
+            arch: i686
+            python-arch: x86
+            ext: .exe
+
+          # ---------- Linux ----------
+          - os: ubuntu-latest
+            target: linux-x64
+            arch: x86_64
+            ext: ''
+          - os: ubuntu-latest
+            target: linux-arm64
+            arch: aarch64
+            ext: ''
+            use-qemu: true
+
+          # ---------- macOS ----------
+          - os: macos-latest      # Apple Silicon (arm64)
+            target: macos-arm64
+            arch: arm64
+            ext: ''
+          - os: macos-13          # Intel (x86_64)
+            target: macos-x64
+            arch: x86_64
+            ext: ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ----- QEMU для ARM-сборки на Linux -----
+      - name: Set up QEMU
+        if: matrix.use-qemu
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      # ----- Python (для не-ARM) -----
+      - name: Set up Python
+        if: ${{ !matrix.use-qemu }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: ${{ matrix.python-arch || 'x64' }}
+
+      - name: Install dependencies (native)
+        if: ${{ !matrix.use-qemu }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Install tkinter (Linux)
+        if: runner.os == 'Linux' && !matrix.use-qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk
+
+      # ----- Сборка PyInstaller (native) -----
+      - name: Build with PyInstaller (native)
+        if: ${{ !matrix.use-qemu }}
+        shell: bash
+        run: |
+          pyinstaller \
+            --onefile \
+            --noconfirm \
+            --clean \
+            --name krust-${{ matrix.target }} \
+            main.py
+
+      # ----- ARM64 сборка через Docker + QEMU -----
+      - name: Build with PyInstaller (ARM64 via Docker)
+        if: matrix.use-qemu
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v ${{ github.workspace }}:/work \
+            -w /work \
+            arm64v8/python:3.11-slim \
+            bash -c "
+              apt-get update &&
+              apt-get install -y binutils python3-tk &&
+              pip install --upgrade pip &&
+              pip install -r requirements.txt pyinstaller &&
+              pyinstaller --onefile --noconfirm --clean --name krust-${{ matrix.target }} main.py
+            "
+          sudo chown -R $(id -u):$(id -g) dist build || true
+
+      # ----- Переименование (добавляем .exe на Windows) -----
+      - name: Rename artifact
+        shell: bash
+        run: |
+          SRC="dist/krust-${{ matrix.target }}"
+          DST="dist/krust-${{ matrix.target }}${{ matrix.ext }}"
+          if [ -f "$SRC" ]; then mv "$SRC" "$DST"; fi
+          ls -la dist/
+
+      # ----- Загрузка артефакта -----
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: krust-${{ matrix.target }}
+          path: dist/krust-${{ matrix.target }}${{ matrix.ext }}
+          if-no-files-found: error
+
+  # ============================================================
+  # УПАКОВКА ВСЕХ БИНАРНИКОВ В АРХИВ
+  # ============================================================
+  package:
+    name: Package all binaries
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Upload combined artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: krust-all-binaries
+          path: release/*
+          if-no-files-found: error
